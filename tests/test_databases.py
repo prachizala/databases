@@ -891,6 +891,29 @@ async def test_transaction_rollback_low_level(database_url):
 
 @pytest.mark.parametrize("database_url", DATABASE_URLS)
 @async_adapter
+async def test_transaction_commit_failure_handled(database_url):
+    """
+    Ensure that when commit() raises an exception, the transaction is popped
+    and connection remains usable.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            transaction = await database.transaction()
+            async def failing_commit():
+                raise RuntimeError("Simulated commit failure")
+            transaction._transaction.commit = failing_commit
+
+            with pytest.raises(RuntimeError):
+                await transaction.commit()
+
+            # Verify connection transaction stack is clean and database is still operational
+            assert len(transaction._connection._transaction_stack) == 1
+            results = await database.fetch_all(query=notes.select())
+            assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
 async def test_transaction_decorator(database_url):
     """
     Ensure that @database.transaction() is supported.
