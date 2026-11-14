@@ -460,11 +460,16 @@ class Transaction:
     async def commit(self) -> None:
         async with self._connection._transaction_lock:
             assert self._connection._transaction_stack[-1] is self
-            self._connection._transaction_stack.pop()
             assert self._transaction is not None
-            await self._transaction.commit()
-            await self._connection.__aexit__()
-            self._transaction = None
+            try:
+                await self._transaction.commit()
+            except BaseException:
+                await self._transaction.rollback()
+                raise
+            finally:
+                self._connection._transaction_stack.pop()
+                await self._connection.__aexit__()
+                self._transaction = None
 
     async def rollback(self) -> None:
         async with self._connection._transaction_lock:
