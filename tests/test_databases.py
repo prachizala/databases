@@ -899,14 +899,67 @@ async def test_transaction_commit_failure_handled(database_url):
     async with Database(database_url) as database:
         async with database.transaction(force_rollback=True):
             transaction = await database.transaction()
+            rollback_called = False
+            orig_rollback = transaction._transaction.rollback
+
             async def failing_commit():
                 raise RuntimeError("Simulated commit failure")
+
+            async def tracking_rollback():
+                nonlocal rollback_called
+                rollback_called = True
+                await orig_rollback()
+
             transaction._transaction.commit = failing_commit
+            transaction._transaction.rollback = tracking_rollback
 
             with pytest.raises(RuntimeError):
                 await transaction.commit()
 
+            assert rollback_called
             # Verify connection transaction stack is clean and database is still operational
+            assert len(transaction._connection._transaction_stack) == 1
+            results = await database.fetch_all(query=notes.select())
+            assert len(results) == 0
+
+
+@pytest.mark.parametrize("database_url", DATABASE_URLS)
+@async_adapter
+async def test_transaction_context_manager_commit_failure(database_url):
+    """
+    Ensure that when commit() raises an exception during context exit,
+    the transaction is rolled back and connection transaction stack remains clean.
+    """
+    async with Database(database_url) as database:
+        async with database.transaction(force_rollback=True):
+            transaction = database.transaction()
+            rollback_called = False
+
+            transaction_start_orig = transaction.start
+
+            async def start_with_mocked_commit(*args, **kwargs):
+                await transaction_start_orig(*args, **kwargs)
+                orig_rollback = transaction._transaction.rollback
+
+                async def failing_commit():
+                    raise RuntimeError("Simulated commit failure in context manager")
+
+                async def tracking_rollback():
+                    nonlocal rollback_called
+                    rollback_called = True
+                    await orig_rollback()
+
+                transaction._transaction.commit = failing_commit
+                transaction._transaction.rollback = tracking_rollback
+                return transaction
+
+            transaction.start = start_with_mocked_commit
+
+            with pytest.raises(RuntimeError, match="Simulated commit failure in context manager"):
+                async with transaction:
+                    pass
+
+            assert rollback_called
             assert len(transaction._connection._transaction_stack) == 1
             results = await database.fetch_all(query=notes.select())
             assert len(results) == 0
